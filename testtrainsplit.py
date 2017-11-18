@@ -1,75 +1,184 @@
-
-
-# Load libraries
-import pandas as pd
-from pandas.plotting import scatter_matrix
+from collections import Counter
+import datetime as dt
 import matplotlib.pyplot as plt
-from sklearn import preprocessing
-from sklearn import model_selection
-from sklearn.metrics import classification_report
-from sklearn.metrics import confusion_matrix
-from sklearn.metrics import accuracy_score
-from sklearn.linear_model import LogisticRegression
-from sklearn.tree import DecisionTreeClassifier
-from sklearn.neighbors import KNeighborsClassifier
-from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
-from sklearn.naive_bayes import GaussianNB
-from sklearn.svm import SVC
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import mean_squared_error
+from matplotlib import style
 import numpy as np
-
-#reads file into data
-df = pd.read_csv('housing_prices.csv')
-df['City'] = df['City'].map({'Mountain View': 0, 'Camarillo': 1, 'La Mirada': 2, 'Santa Cruz': 3, 'Santa Clarita': 4, 'Paso Robles': 5, 'Montecito': 6,
-                            'Carpinteria': 7, 'Roseville': 8, 'Clairmont': 9, 'Corona': 10, 'Oxnard': 11, 'Tracy': 12,
-                            'Chino': 13, 'pleasanton': 14, 'Seal Beach': 15, 'Carmel Valley': 16, 'Moraga': 17,
-                            'Redondo Beach': 18, 'Atascadero': 19, 'Antioch': 20, 'Goleta': 21, 'Marina': 22, 'Costa Mesa': 23, 'Tustin': 24, 'modesto': 25,
-                            'Danville': 26, 'Lake Forest': 27, 'Saratoga': 28, 'El Dorado Hills': 29, 'Dublin': 30, 'Shingle Springs': 31, 'Cambria': 32,
-                            'Oceanside': 33, 'McKinleyville': 34, 'San Luis Obispo': 35, 'Canyon Lake': 36, 'Central San Francisco': 37, 'Rohnert Park City': 38, 'Morro Bay': 39, 'Redwood City' : 40, 'Salida' : 41, 'Rocklin' :42, 'Folsom' : 43, 'Clayton' : 44, 'Elk Grove' : 45, 'Morgan Hill' : 46, 'Benicia': 47})
-
-
-# Assuming same lines from your example
-#cols_to_norm = ['price','sqft','bedrooms','baths','City']
-#df[cols_to_norm] = df[cols_to_norm].apply(lambda x: (x - x.min()) / (x.max() - x.min()))
-
-#splits data into training and testing sets
-seed = 7
-X_train, X_test, y_train, y_test = train_test_split(df, df['price'],test_size = .3, random_state=seed)
+import pandas as pd
+import pandas_datareader.data as web
+from sklearn.model_selection import train_test_split
+from sklearn import svm, model_selection, neighbors
+from sklearn.ensemble import VotingClassifier, RandomForestClassifier
+from sklearn import preprocessing
+from sklearn import utils
+from sklearn.svm import SVR
 
 
 
-#shape
-print("Shape of data Array: ")
-print(df.shape)
-print(df.describe())
+#start at 1/1/99
+start = dt.datetime(1999,1,1)
+#end at 11/1/17
+end = dt.datetime(2017,11,1)
 
 
-#Univariate plots
-df.plot(kind='box', subplots=True, layout=(3,3), sharex=False, sharey=False)
-plt.show()
+#scrape data from web for the different sectors over the given period
 
-#Multivariate plots
-scatter_matrix(df)
-plt.show()
+#materials
+mat_df = web.DataReader('XLB', 'yahoo', start, end)
 
-#run on train data
-neigh = KNeighborsClassifier(n_neighbors = 1)
-neigh.fit(X_train, y_train)
-KNeighborsClassifier
-pred = neigh.predict(X_train)
-print(pred)
-y_train = y_train.tolist()
-print(y_train)
-print(accuracy_score(y_train, pred))
+#energy
+nrg_df = web.DataReader('XLE', 'yahoo', start, end)
 
-#run on test data
-neigh = KNeighborsClassifier(n_neighbors = 1)
-neigh.fit(X_train, y_train)
-KNeighborsClassifier
-pred = neigh.predict(X_test)
-print(pred)
-y_test = y_test.tolist()
-print(y_test)
-print(accuracy_score(y_test, pred))
+#financials
+fin_df = web.DataReader('XLF', 'yahoo', start, end)
+
+#industrial
+ind_df = web.DataReader('XLI', 'yahoo', start, end)
+
+#technology
+tech_df = web.DataReader('XLK', 'yahoo', start, end)
+
+#Consumer Staples
+cstp_df = web.DataReader('XLP', 'yahoo', start, end)
+
+#utilities
+utl_df = web.DataReader('XLU', 'yahoo', start, end)
+
+#Health Care
+hc_df = web.DataReader('XLV', 'yahoo', start, end)
+
+#consumer discretionary
+cdsc_df = web.DataReader('XLY', 'yahoo', start, end)
+
+#S&P
+sp_df = web.DataReader('^GSPC', 'yahoo', start, end)
+
+
+#dictionary of sectors and their dataframes
+sectors = {'Materials' : mat_df, 'Energy' : nrg_df, 'Financial' : fin_df,
+           'Industrial' : ind_df, 'Technology' : tech_df,
+           'Consumer Staples' : cstp_df, 'Health Care' : hc_df, 'Consumer Discretionary' : cdsc_df,
+           'S&P' : sp_df}
+
+
+#Compiles adjusted close values for all sectors into one data frame
+#adjusted close is used to compensate for things like stock splits
+def compile_data():
+    main_df = pd.DataFrame()
+
+    #loops through sectors stripping unused values
+    for ticker in sectors.keys():
+        sectors[ticker].rename(columns = {'Adj Close': ticker}, inplace=True)
+        sectors[ticker].drop(['Open','High','Low', 'Close', 'Volume'],1,inplace=True)
+        main_df = main_df.join(sectors[ticker], how='outer')
+    return main_df
+
+
+main_df = pd.DataFrame()
+main_df=compile_data()
+
+
+def process_data(sector):
+    #number of weeks to exame over
+    dl_weeks = 7
+    df = main_df
+    sectors = df.columns.values
+    df.fillna(0, inplace=True)
+
+    #evalutes change ind data over the given time span in 5 day (1 trading week) intervals
+    for i in range(1, dl_weeks+1):
+        df['{}_{}weeks'.format(sector,i)] = (df[sector].shift(-i*5)-df[sector])/df[sector]
+
+    df.fillna(0, inplace=True)
+    return sectors, df
+
+
+#Creates dataframe with percent change values for all sectors
+def percent_change():
+    pc_df = pd.DataFrame()
+    for ticker in sectors.keys():
+        pc_df = pc_df.join(main_df[ticker].pct_change(), how='outer')
+        pc_df.fillna(0, inplace=True)
+    return pc_df
+
+#classifies data into buy(1), sell(-1), and hold(0)
+def evaluate(*args):
+    rows = [i for i in args]
+
+    
+    ########## Minimum Change to make Buy/Sell Decision ############
+    minPC = .03
+    ################################################################
+
+    
+    for j in rows:
+        if j < -minPC:
+            return -1
+        if j < minPC:
+            return 1
+    return 0
+
+def features(sector):
+    sectors, df = process_data(sector)
+
+    df['{}_target'.format(sector)]=list(map(evaluate,df['{}_1weeks'.format(sector)], df['{}_2weeks'.format(sector)],df['{}_3weeks'.format(sector)],df['{}_4weeks'.format(sector)],df['{}_5weeks'.format(sector)],df['{}_6weeks'.format(sector)],df['{}_7weeks'.format(sector)]))
+    bhs = df['{}_target'.format(sector)].values.tolist()
+    choices = [str(i) for i in bhs]
+    print('Distribution of Training Selections', Counter(choices))
+
+    #############DATA NORMALIZATION###################
+    #generates array of percent change values
+    df_vals = df[[sector for sector in sectors]].pct_change()
+
+    #fix holes in data if present
+    df_vals = df_vals.replace([np.inf, -np.inf], 0)
+    df_vals.fillna(0, inplace=True)
+
+    
+    X = df_vals.values
+    y = df['{}_target'.format(sector)].values
+
+    return X,y,df
+
+
+#Area for applying machine learning techniques
+def machine(sector):
+    X,y,df = features(sector)
+
+    #30% train test split
+    X_train, X_test, y_train, y_test = train_test_split(X, y,test_size = 0.3)
+
+
+
+    clf = neighbors.KNeighborsClassifier()
+    clf.fit(X_train,y_train)
+
+    print(sector, ': ')
+    performanceTest = clf.score(X_test, y_test)
+    print('Performance on test Data: ', performanceTest)
+    
+    predictionsTest = clf.predict(X_test)
+    print('Distribution of predictions in test data: ', Counter(predictionsTest))
+
+    performanceTrain = clf.score(X_train, y_train)
+    print('Performance on train Data: ', performanceTrain)
+
+    predictionsTrain = clf.predict(X_train)
+    print('Distribution of predictions in train data: ', Counter(predictionsTrain))
+    print('\n')
+
+
+
+
+#The passed sector is what is evaluated
+for sector in sectors:
+    machine(sector)
+
+
+
+
+
+
+
+
+
 
